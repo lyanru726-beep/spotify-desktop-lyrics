@@ -1,0 +1,4 @@
+cache/
+logs/
+config.json
+*.log
