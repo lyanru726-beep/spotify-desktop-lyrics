@@ -1042,7 +1042,7 @@ function Start-Track {
     }
 
     Write-Log "lyrics loaded: $($script:Lines.Count) lines from $($bundle.Source)"
-    $script:HeaderBase = "$label    ·  $($bundle.Source)"
+    $script:HeaderBase = $label
     Update-Header
     $script:Index = -2
     Render-CurrentLine
