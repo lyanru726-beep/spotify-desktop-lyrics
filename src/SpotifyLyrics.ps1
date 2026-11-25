@@ -84,6 +84,8 @@ $script:DefaultConfig = [ordered]@{
     netease            = $true
     lrclib             = $true
     syncOffset         = 0.0
+    ballSize           = 58          # 悬浮球直径
+    collapsed          = $false      # 启动时是否收起成球
     ai                 = [ordered]@{
         enabled = $true
         apiKey  = ''
@@ -596,6 +598,29 @@ $panel.Padding    = New-Object System.Windows.Thickness(26, 12, 26, 10)
 $panel.MinHeight  = 0
 $root.Children.Add($panel) | Out-Null
 
+# --- 悬浮球（收起状态） ---
+$ball = New-Object System.Windows.Controls.Border
+$ball.Width  = 58.0
+$ball.Height = 58.0
+$ball.CornerRadius = New-Object System.Windows.CornerRadius -ArgumentList 29.0
+$ball.Background = Get-Brush '#E00B1020'
+$ball.BorderBrush = Get-Brush '#40FFFFFF'
+$ball.BorderThickness = New-Object System.Windows.Thickness(1)
+$ball.HorizontalAlignment = 'Center'
+$ball.VerticalAlignment = 'Center'
+$ball.Cursor = [System.Windows.Input.Cursors]::Hand
+$ball.Visibility = 'Collapsed'
+$ball.ToolTip = '点一下展开歌词，右键更多'
+$ballText = New-Object System.Windows.Controls.TextBlock
+$ballText.Text = '♪'
+$ballText.FontFamily = New-Object System.Windows.Media.FontFamily($script:FontName)
+$ballText.FontSize = 24.0
+$ballText.Foreground = $script:BrushHi
+$ballText.HorizontalAlignment = 'Center'
+$ballText.VerticalAlignment = 'Center'
+$ball.Child = $ballText
+$root.Children.Add($ball) | Out-Null
+
 $stack = New-Object System.Windows.Controls.StackPanel
 $panel.Child = $stack
 
@@ -667,6 +692,8 @@ $script:Ui = @{
     BtnBar   = $btnBar
     Panel    = $panel
     MainGrid = $mainGrid
+    Ball     = $ball
+    BallText = $ballText
 }
 
 # --- 按钮逻辑 ---
@@ -719,10 +746,11 @@ $btnSmaller = New-FlatButton -Text 'A−' -Tip '缩小字号'       -OnClick { C
 $btnBigger  = New-FlatButton -Text 'A+' -Tip '放大字号'       -OnClick { Change-FontSize 3 }
 $btnReload  = New-FlatButton -Text '↻'  -Tip '重新获取歌词'   -OnClick { Force-Reload }
 $btnLock    = New-FlatButton -Text '锁'  -Tip '锁定：鼠标穿透，按 Ctrl+Alt+L 解锁' -OnClick { Set-Locked (-not $script:Locked) }
+$btnOpacity = New-FlatButton -Text '透'  -Tip '底板透明度：无 / 淡 / 中 / 深' -OnClick { Cycle-PanelOpacity }
 $btnClose   = New-FlatButton -Text '✕'  -Tip '退出'            -OnClick { $script:Win.Close() }
 
 foreach ($b in @($script:Ui.Buttons['original'], $script:Ui.Buttons['translation'], $script:Ui.Buttons['both'],
-        $btnSmaller, $btnBigger, $btnReload, $btnLock, $btnClose)) {
+        $btnSmaller, $btnBigger, $btnReload, $btnOpacity, $btnLock, $btnClose)) {
     [void]$btnBar.Children.Add($b)
 }
 Refresh-ModeButtons
@@ -731,7 +759,7 @@ Refresh-ModeButtons
 $panel.Add_MouseEnter({ $script:Ui.BtnBar.Opacity = 1.0 })
 $panel.Add_MouseLeave({ $script:Ui.BtnBar.Opacity = 0.42 })
 
-# 拖动
+# 拖动：整条都能拖，拖到屏幕边缘自动收成小球
 $dragHandler = {
     param($s, $e)
     try {
@@ -739,9 +767,10 @@ $dragHandler = {
         $script:Cfg.x = [Math]::Round($script:Win.Left)
         $script:Cfg.y = [Math]::Round($script:Win.Top)
         Save-Config
-    } catch {}
+    } catch { return }
+    if (-not $script:Collapsed -and (Test-NearEdge)) { Set-Collapsed $true }
 }
-foreach ($el in @($mainGrid, $trackTb)) { $el.Add_MouseLeftButtonDown($dragHandler) }
+foreach ($el in @($panel, $mainGrid, $trackTb)) { $el.Add_MouseLeftButtonDown($dragHandler) }
 
 # 双击切换模式 / 滚轮调字号
 $script:Win.Add_MouseDoubleClick({ Cycle-Mode })
@@ -818,6 +847,99 @@ function Test-LockHotkey {
         return ($c -and $a -and $k)
     } catch { return $false }
 }
+
+# ---------------------------- 底板透明度 / 收起成球 ----------------------------
+$script:Collapsed = $false
+
+function Set-PanelOpacity {
+    param([double]$Value)
+    $v = [Math]::Max(0.0, [Math]::Min(1.0, $Value))
+    $script:Cfg.panelOpacity = $v
+    $a = [int][Math]::Round($v * 255)
+    $script:Ui.Panel.Background = Get-Brush ('#{0:X2}0B1020' -f $a)
+    Save-Config
+}
+
+function Cycle-PanelOpacity {
+    $steps = @(0.0, 0.2, 0.35, 0.52, 0.8)
+    $cur = [double]$script:Cfg.panelOpacity
+    $idx = 0
+    for ($i = 0; $i -lt $steps.Count; $i++) { if ($cur -ge ($steps[$i] - 0.03)) { $idx = $i } }
+    $next = $steps[($idx + 1) % $steps.Count]
+    Set-PanelOpacity $next
+    $pct = [int][Math]::Round($next * 100)
+    Show-Status ("底板不透明度 " + $pct + "%")
+}
+
+function Set-Collapsed {
+    param([bool]$On)
+    if ($On -eq $script:Collapsed) { return }
+    $screenW = [double][System.Windows.SystemParameters]::PrimaryScreenWidth
+    $screenH = [double][System.Windows.SystemParameters]::PrimaryScreenHeight
+    if ($On) {
+        $script:Cfg.x = [Math]::Round($script:Win.Left)
+        $script:Cfg.y = [Math]::Round($script:Win.Top)
+        $script:Ui.Panel.Visibility = 'Collapsed'
+        $script:Ui.Ball.Visibility = 'Visible'
+        $script:Win.Width = [double]$script:Cfg.ballSize
+        $bs = [double]$script:Cfg.ballSize
+        $side = if ($script:Win.Left -lt ($screenW / 2)) { 8.0 } else { $screenW - $bs - 8.0 }
+        $top = [Math]::Max(8.0, [Math]::Min($screenH - $bs - 8.0, [double]$script:Win.Top))
+        $script:Win.Left = $side
+        $script:Win.Top = $top
+    } else {
+        $script:Ui.Ball.Visibility = 'Collapsed'
+        $script:Ui.Panel.Visibility = 'Visible'
+        $script:Win.Width = [double]$script:Cfg.windowWidth
+        $l = [double]$script:Win.Left
+        $t = [double]$script:Win.Top
+        if ($l -lt 0) { $l = 0 }
+        if ($l -gt ($screenW - [double]$script:Cfg.windowWidth)) { $l = $screenW - [double]$script:Cfg.windowWidth }
+        if ($t -lt 0) { $t = 0 }
+        if ($t -gt ($screenH - 140.0)) { $t = $screenH - 140.0 }
+        $script:Win.Left = $l
+        $script:Win.Top = $t
+    }
+    $script:Collapsed = $On
+    $script:Cfg.collapsed = $On
+    Save-Config
+}
+
+function Test-NearEdge {
+    $screenW = [double][System.Windows.SystemParameters]::PrimaryScreenWidth
+    $screenH = [double][System.Windows.SystemParameters]::PrimaryScreenHeight
+    $l = [double]$script:Win.Left
+    $t = [double]$script:Win.Top
+    $r = $l + [double]$script:Win.ActualWidth
+    $b = $t + [double]$script:Win.ActualHeight
+    return (($l -le 12.0) -or ($r -ge ($screenW - 12.0)) -or ($t -le 12.0) -or ($b -ge ($screenH - 12.0)))
+}
+
+$ballMenu = New-Object System.Windows.Controls.ContextMenu
+$miExpand = New-Object System.Windows.Controls.MenuItem
+$miExpand.Header = '展开歌词'
+$miExpand.Add_Click({ Set-Collapsed $false })
+[void]$ballMenu.Items.Add($miExpand)
+[void]$ballMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+$miBallQuit = New-Object System.Windows.Controls.MenuItem
+$miBallQuit.Header = '退出'
+$miBallQuit.Add_Click({ $script:Win.Close() })
+[void]$ballMenu.Items.Add($miBallQuit)
+$script:Ui.Ball.ContextMenu = $ballMenu
+
+$script:Ui.Ball.Add_MouseLeftButtonDown({
+        $l0 = [double]$script:Win.Left
+        $t0 = [double]$script:Win.Top
+        try { $script:Win.DragMove() } catch { return }
+        $moved = ([Math]::Abs([double]$script:Win.Left - $l0) -gt 3.0) -or ([Math]::Abs([double]$script:Win.Top - $t0) -gt 3.0)
+        $screenW = [double][System.Windows.SystemParameters]::PrimaryScreenWidth
+        if ($script:Win.Left -lt 40.0) { $script:Win.Left = 8.0 }
+        elseif (([double]$script:Win.Left + [double]$script:Win.ActualWidth) -gt ($screenW - 40.0)) { $script:Win.Left = $screenW - [double]$script:Win.ActualWidth - 8.0 }
+        $script:Cfg.x = [Math]::Round($script:Win.Left)
+        $script:Cfg.y = [Math]::Round($script:Win.Top)
+        Save-Config
+        if (-not $moved) { Set-Collapsed $false }
+    })
 
 # ---------------------------- 渲染 ----------------------------
 $script:Lines      = @()
@@ -1177,13 +1299,17 @@ if ([double]$script:Cfg.x -ge 0 -and [double]$script:Cfg.y -ge 0) {
     $script:Win.Top  = [Math]::Round($screenH - $winH - 60)
 }
 
+if ([bool]$script:Cfg.collapsed) { Set-Collapsed $true }
+
 $script:Win.Add_SizeChanged({ Fit-WindowHeight })
 
 $script:Win.Add_Closed({
         try {
             if (-not $Snapshot) {
-                $script:Cfg.x = [Math]::Round($script:Win.Left)
-                $script:Cfg.y = [Math]::Round($script:Win.Top)
+                if (-not $script:Collapsed) {
+                    $script:Cfg.x = [Math]::Round($script:Win.Left)
+                    $script:Cfg.y = [Math]::Round($script:Win.Top)
+                }
                 Save-Config
             }
             if ($script:TrJob) { Stop-Job -Job $script:TrJob -ErrorAction SilentlyContinue; Remove-Job -Job $script:TrJob -Force -ErrorAction SilentlyContinue }
