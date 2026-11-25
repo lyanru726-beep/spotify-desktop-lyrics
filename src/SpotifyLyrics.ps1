@@ -59,13 +59,15 @@ function Write-Log {
 
 # ---------------------------- 只允许一个实例 ----------------------------
 $script:SingleMutex = $null
-try {
-    $script:SingleMutex = New-Object System.Threading.Mutex -ArgumentList $false, 'Local\SpotifyDesktopLyrics_v1'
-    if (-not $script:SingleMutex.WaitOne(0)) {
-        Write-Log 'already running, exit this instance'
-        exit
-    }
-} catch {}
+if (-not $Snapshot -and $env:SPOTIFY_LYRICS_TEST -ne '1') {
+    try {
+        $script:SingleMutex = New-Object System.Threading.Mutex -ArgumentList $false, 'Local\SpotifyDesktopLyrics_v1'
+        if (-not $script:SingleMutex.WaitOne(0)) {
+            Write-Log 'already running, exit this instance'
+            exit
+        }
+    } catch {}
+}
 
 # ---------------------------- 配置 ----------------------------
 $script:DefaultConfig = [ordered]@{
@@ -77,6 +79,7 @@ $script:DefaultConfig = [ordered]@{
     windowHeight       = 200
     panelOpacity       = 0.52        # 歌词底板透明度 0~1
     windowOpacity      = 1.0
+    lyricColor         = '#FFFFFFFF'  # 歌词颜色 ARGB
     x                  = -1
     y                  = -1
     showNextLine       = $true
@@ -561,6 +564,12 @@ function New-FlatButton {
     $b.Margin  = New-Object System.Windows.Thickness(3, 0, 0, 0)
     $b.Cursor  = [System.Windows.Input.Cursors]::Hand
     $b.Focusable = $false
+    $bShadow = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $bShadow.Color = [System.Windows.Media.Colors]::Black
+    $bShadow.BlurRadius = 7.0
+    $bShadow.ShadowDepth = 0.0
+    $bShadow.Opacity = 0.9
+    $b.Effect = $bShadow
     if ($Tip) { $b.ToolTip = $Tip }
     $b.Template = [System.Windows.Markup.XamlReader]::Parse(@'
 <ControlTemplate TargetType="Button" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
@@ -643,8 +652,13 @@ $btnBar = New-Object System.Windows.Controls.StackPanel
 $btnBar.Orientation = 'Horizontal'
 $btnBar.HorizontalAlignment = 'Right'
 $btnBar.Opacity = 0.42
-[System.Windows.Controls.Grid]::SetColumn($btnBar, 1)
-$header.Children.Add($btnBar) | Out-Null
+$btnShell = New-Object System.Windows.Controls.Border
+$btnShell.CornerRadius = New-Object System.Windows.CornerRadius(10)
+$btnShell.Padding = New-Object System.Windows.Thickness(6, 2, 6, 2)
+$btnShell.Background = $null
+$btnShell.Child = $btnBar
+[System.Windows.Controls.Grid]::SetColumn($btnShell, 1)
+$header.Children.Add($btnShell) | Out-Null
 
 $stack.Children.Add($header) | Out-Null
 
@@ -690,10 +704,12 @@ $script:Ui = @{
     Clip     = $clipGeo
     Buttons  = @{}
     BtnBar   = $btnBar
+    BtnShell = $btnShell
     Panel    = $panel
     MainGrid = $mainGrid
     Ball     = $ball
     BallText = $ballText
+    ColorDot = $colorDot
 }
 
 # --- 按钮逻辑 ---
@@ -746,22 +762,85 @@ $btnSmaller = New-FlatButton -Text 'A−' -Tip '缩小字号'       -OnClick { C
 $btnBigger  = New-FlatButton -Text 'A+' -Tip '放大字号'       -OnClick { Change-FontSize 3 }
 $btnReload  = New-FlatButton -Text '↻'  -Tip '重新获取歌词'   -OnClick { Force-Reload }
 $btnLock    = New-FlatButton -Text '锁'  -Tip '锁定：鼠标穿透，按 Ctrl+Alt+L 解锁' -OnClick { Set-Locked (-not $script:Locked) }
+# 歌词颜色：圆形色块 + 弹出选色
+$colorDot = New-Object System.Windows.Controls.Border
+$colorDot.Width = 16.0
+$colorDot.Height = 16.0
+$colorDot.CornerRadius = New-Object System.Windows.CornerRadius -ArgumentList 8.0
+$colorDot.BorderThickness = New-Object System.Windows.Thickness(1.5)
+$colorDot.BorderBrush = Get-Brush '#80FFFFFF'
+$colorDot.Background = $script:BrushHi
+$colorDot.Cursor = [System.Windows.Input.Cursors]::Hand
+$colorDot.Margin = New-Object System.Windows.Thickness(10, 0, 2, 0)
+$colorDot.VerticalAlignment = 'Center'
+$colorDot.ToolTip = '歌词颜色'
+$dotShadow = New-Object System.Windows.Media.Effects.DropShadowEffect
+$dotShadow.Color = [System.Windows.Media.Colors]::Black
+$dotShadow.BlurRadius = 7.0
+$dotShadow.ShadowDepth = 0.0
+$dotShadow.Opacity = 0.9
+$colorDot.Effect = $dotShadow
+
+$script:ColorPopup = New-Object System.Windows.Controls.Primitives.Popup
+$script:ColorPopup.StaysOpen = $true
+$script:ColorPopup.PlacementTarget = $colorDot
+$script:ColorPopup.Placement = 'Bottom'
+$script:ColorPopup.AllowsTransparency = $true
+$popBox = New-Object System.Windows.Controls.Border
+$popBox.Background = Get-Brush '#F00B1020'
+$popBox.CornerRadius = New-Object System.Windows.CornerRadius -ArgumentList 14.0
+$popBox.Padding = New-Object System.Windows.Thickness(10, 9, 10, 9)
+$popBox.Margin = New-Object System.Windows.Thickness(0, 6, 0, 0)
+$popSp = New-Object System.Windows.Controls.StackPanel
+$popSp.Orientation = 'Horizontal'
+$swTemplate = [System.Windows.Markup.XamlReader]::Parse('<ControlTemplate TargetType="Button" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"><Ellipse Fill="{TemplateBinding Background}" Stroke="#40FFFFFF" StrokeThickness="1"/></ControlTemplate>')
+foreach ($hex in @('#FFFFFFFF','#FFFFF3D6','#FF8CD2FF','#FF8DF5C8','#FFFFA8D0','#FFC9A6FF','#FFFFD166','#FFFF9E5E')) {
+    $sw = New-Object System.Windows.Controls.Button
+    $sw.Width = 24.0
+    $sw.Height = 24.0
+    $sw.Margin = New-Object System.Windows.Thickness(4, 0, 4, 0)
+    $sw.Background = Get-Brush $hex
+    $sw.BorderThickness = New-Object System.Windows.Thickness(0)
+    $sw.Cursor = [System.Windows.Input.Cursors]::Hand
+    $sw.Focusable = $false
+    $sw.Tag = $hex
+    $sw.Template = $swTemplate
+    $sw.Add_Click({
+            param($s, $e)
+            Apply-LyricColor -Hex ([string]$s.Tag) -Save $true
+            $script:ColorPopup.IsOpen = $false
+        })
+    [void]$popSp.Children.Add($sw)
+}
+$popBox.Child = $popSp
+$script:ColorPopup.Child = $popBox
+$colorDot.Add_MouseLeftButtonDown({
+        param($s, $e)
+        $e.Handled = $true
+    })
+$colorDot.Add_MouseLeftButtonUp({
+        param($s, $e)
+        $e.Handled = $true
+        $script:ColorPopup.IsOpen = -not $script:ColorPopup.IsOpen
+    })
+
 $btnOpacity = New-FlatButton -Text '透'  -Tip '底板透明度：无 / 淡 / 中 / 深' -OnClick { Cycle-PanelOpacity }
 $btnClose   = New-FlatButton -Text '✕'  -Tip '退出'            -OnClick { $script:Win.Close() }
 
 foreach ($b in @($script:Ui.Buttons['original'], $script:Ui.Buttons['translation'], $script:Ui.Buttons['both'],
-        $btnSmaller, $btnBigger, $btnReload, $btnOpacity, $btnLock, $btnClose)) {
+        $btnSmaller, $btnBigger, $btnReload, $colorDot, $btnOpacity, $btnLock, $btnClose)) {
     [void]$btnBar.Children.Add($b)
 }
 Refresh-ModeButtons
 
 # 悬停时按钮变清晰
 $panel.Add_MouseEnter({ $script:Ui.BtnBar.Opacity = 1.0 })
-$panel.Add_MouseLeave({ $script:Ui.BtnBar.Opacity = 0.42 })
+$panel.Add_MouseLeave({ if ([double]$script:Cfg.panelOpacity -le 0.05) { $script:Ui.BtnBar.Opacity = 0.95 } else { $script:Ui.BtnBar.Opacity = 0.42 } })
 
 # 拖动：整条都能拖，拖到屏幕边缘自动收成小球
 $dragHandler = {
     param($s, $e)
+    if ($script:ColorPopup) { $script:ColorPopup.IsOpen = $false }
     try {
         $script:Win.DragMove()
         $script:Cfg.x = [Math]::Round($script:Win.Left)
@@ -773,7 +852,15 @@ $dragHandler = {
 foreach ($el in @($panel, $mainGrid, $trackTb)) { $el.Add_MouseLeftButtonDown($dragHandler) }
 
 # 双击切换模式 / 滚轮调字号
-$script:Win.Add_MouseDoubleClick({ Cycle-Mode })
+$script:Win.Add_MouseDoubleClick({
+        param($s, $e)
+        $node = $e.OriginalSource
+        while ($null -ne $node) {
+            if ($node -is [System.Windows.Controls.Primitives.ButtonBase]) { return }
+            $node = [System.Windows.Media.VisualTreeHelper]::GetParent($node)
+        }
+        Cycle-Mode
+    })
 $panel.Add_MouseWheel({
         param($s, $e)
         if ($e.Delta -gt 0) { Change-FontSize 3 } else { Change-FontSize -3 }
@@ -848,8 +935,53 @@ function Test-LockHotkey {
     } catch { return $false }
 }
 
-# ---------------------------- 底板透明度 / 收起成球 ----------------------------
+# ---------------------------- 底板透明度 / 收起成球 / 歌词颜色 ----------------------------
 $script:Collapsed = $false
+
+function ConvertTo-ColorHex {
+    param([string]$Hex, [int]$Alpha)
+    $h = ([string]$Hex).TrimStart('#')
+    if ($h.Length -eq 6) { $h = 'FF' + $h }
+    if ($h.Length -ne 8) { return '#FFFFFFFF' }
+    return ('#{0:X2}{1}' -f $Alpha, $h.Substring(2))
+}
+
+function Apply-LyricColor {
+    param([string]$Hex, [bool]$Save = $true)
+    $hi = ConvertTo-ColorHex $Hex 255
+    $base = ConvertTo-ColorHex $Hex 102
+    $script:BrushHi = Get-Brush $hi
+    $script:BrushBase = Get-Brush $base
+    $script:Cfg.lyricColor = $hi
+    if ($script:Ui) {
+        if ($script:Ui.MainHi) { $script:Ui.MainHi.Foreground = $script:BrushHi }
+        if ($script:Ui.MainBase) { $script:Ui.MainBase.Foreground = $script:BrushBase }
+        if ($script:Ui.BallText) { $script:Ui.BallText.Foreground = $script:BrushHi }
+        if ($script:Ui.ColorDot) { $script:Ui.ColorDot.Background = $script:BrushHi }
+    }
+    if ($Save) { Save-Config }
+}
+
+Apply-LyricColor -Hex ([string]$script:Cfg.lyricColor) -Save $false
+
+function Update-Contrast {
+    param([double]$Value)
+    if (-not $script:Ui) { return }
+    $transparent = ($Value -le 0.05)
+    if ($script:Ui.BtnBar) {
+        if ($transparent) { $script:Ui.BtnShell.Background = Get-Brush '#B8000000'; $script:Ui.BtnBar.Opacity = 0.95; $script:Ui.BtnShell.Padding = New-Object System.Windows.Thickness(6,2,6,2) }
+        else { $script:Ui.BtnShell.Background = $null; $script:Ui.BtnBar.Opacity = 0.42 }
+    }
+    foreach ($tb in @($script:Ui.MainBase, $script:Ui.MainHi, $script:Ui.Tr, $script:Ui.Next)) {
+        if ($null -eq $tb) { continue }
+        $sh = New-Object System.Windows.Media.Effects.DropShadowEffect
+        $sh.Color = [System.Windows.Media.Colors]::Black
+        $sh.ShadowDepth = 0
+        if ($transparent) { $sh.BlurRadius = 18; $sh.Opacity = 1.0 }
+        else { $sh.BlurRadius = 7; $sh.Opacity = 0.9 }
+        $tb.Effect = $sh
+    }
+}
 
 function Set-PanelOpacity {
     param([double]$Value)
@@ -857,6 +989,7 @@ function Set-PanelOpacity {
     $script:Cfg.panelOpacity = $v
     $a = [int][Math]::Round($v * 255)
     $script:Ui.Panel.Background = Get-Brush ('#{0:X2}0B1020' -f $a)
+    Update-Contrast $v
     Save-Config
 }
 
@@ -1224,6 +1357,8 @@ function Save-DebugShot {
     } catch { Write-Log "debug shot fail: $($_.Exception.Message)" }
 }
 
+Update-Contrast ([double]$script:Cfg.panelOpacity)
+
 $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
 $script:Timer.Interval = [TimeSpan]::FromMilliseconds(100)
 
@@ -1305,7 +1440,7 @@ $script:Win.Add_SizeChanged({ Fit-WindowHeight })
 
 $script:Win.Add_Closed({
         try {
-            if (-not $Snapshot) {
+            if (-not $Snapshot -and $env:SPOTIFY_LYRICS_TEST -ne '1') {
                 if (-not $script:Collapsed) {
                     $script:Cfg.x = [Math]::Round($script:Win.Left)
                     $script:Cfg.y = [Math]::Round($script:Win.Top)
